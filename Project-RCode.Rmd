@@ -1,0 +1,903 @@
+---
+title: "Analyzing Consumer Behavior in LendingClub Data"
+author: "Jia Lin Mei | Report 4"
+date: "April 28, 2020"
+output:
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, include=FALSE}
+options(tinytex.verbose = TRUE)
+```
+***
+
+## **Introduction**  
+LendingClub is a peer-to-peer service that matches borrowers to lenders while charging fees to those that use their online platform. One of the first to pioneer this method, it has become a very reputable company in the financial services industry that helps borrowers attain loans with lower interest rates and investors gain competitive returns. A crucial part of this service is screening borrowers and only allowing those who have the highest chances of paying back their loans to be part of the company's clientele. Thus, the goal of my project is to identify the qualities of borrowers or their cases that leads them to successfully pay back their loan. In my data from Kaggle.com, I am looking at LendingClub's quarterly loan data from 2007-2015. This is qualtitative data set. I am seeking to understand a relationship between loan status (current, late, or fully paid) and the 75 possible variables. The file is a matrix of about 890 thousand observations.  
+
+***  
+
+##**First Report**  
+
+###1.1 - Picking my X's  
+Before uploading my dataset onto R, I first removed variables and columns that I was not interested in, making a dataset that could be loaded more quickly onto in R. I picked 4 variables or X's that I believe could explain Y would be annual income, grade, employment length, and interest rate.  
+
+```{r include=FALSE}
+library(ISLR)
+library(dplyr)
+library(ggplot2)
+library(tidyverse)
+library(boot)
+```
+
+```{r}
+setwd('/Users/Personal/Documents/1. Spring 2020/2. Econ 490/Homework')
+loan <-read.csv("loan3.csv", header = T)
+str(loan)
+```
+
+All the variables are in the right type to be used in my analysis. Finally, to make things smoother later on, I notice that I have "n/a" values in my dataset. I will use subsetting to turn those into NA and remove those observations from my dataset.  
+
+```{r}
+loan[loan == "n/a"] <- NA 
+loan <- na.omit(loan)
+```
+
+
+###1.2 - Plots of Variables  
+Below is a histogram of my dependent, categorical variable of interest, loan status. Originally, the variable actually had several possible levels such as "Grace Period" and  "Late (16-30 Days)." However, because the logit model in R limits me to only binary variables (having only two values), I had to eliminate some of the levels or reassign their observations to other levels. Upon checking that very few people had actually defaulted, I decided to include "Charged Off" since those accounts are assumed to never be fully paid off. I will change the level name of that variable to "Default or Charged Off" to refelct this change.  
+
+```{r}
+loan[loan$loan_status == "Charged Off",]$loan_status <- "Default"
+loan <- loan[!loan$loan_status == "Late (16-30 days)",]
+loan <- loan[!loan$loan_status == "In Grace Period",]
+loan <- loan[!loan$loan_status == "Late (31-120 days)",]
+loan <- loan[!loan$loan_status == "Current",]
+```
+
+```{r}
+loan$loan_status <- factor(loan$loan_status)
+loan$loan_status <- as.character(loan$loan_status)
+loan[loan$loan_status == "Default",]$loan_status <- "Default or Charged Off"
+loan$loan_status <- factor(loan$loan_status)
+```
+
+In the future, I hope to improve on this by adding a "Current" category as there were a lot of observations with this status, and possibly use a multinomial logit model (if it's introduced in class).  
+
+```{r, cache=TRUE}
+ggplot(data = loan, mapping = aes(x = loan_status)) + 
+  geom_bar(fill="lightblue") + 
+  labs(title = "Loan Status", y = "Count")
+```
+
+```{r}
+table(loan$loan_status)
+```
+
+As the table shows, a greater fraction of borrowers paid off their loan than deafulted. Now, I will look at the graphs of my regressors to see if there's any casual relationship. Befire I do that however, I can see that emp_length needs some cleaning because there are two different levels that basically mean one year.  
+
+```{r}
+loan[loan$emp_length == "< 1 year",]$emp_length <- "1 year"
+loan$emp_length <- factor(loan$emp_length)
+```
+
+```{r}
+p1.1grade <- ggplot(data =loan, mapping = aes(x=grade)) + 
+  geom_bar(fill = "lightblue") + 
+  labs(title = "Loan Grade", y = "Count")
+
+p1.2inc <- ggplot(data=loan, mapping = aes(y=annual_inc, x = grade)) + geom_boxplot(color= "darkgray") + 
+  labs(title = "Annual Income", x = "Grade", Y = "Amount in Dollars")
+
+p1.3emp <- ggplot(data = loan, mapping = aes(x=emp_length)) + 
+  geom_bar(fill = "lightblue") + 
+  labs(title = "Employment Length", x = "Years of Employment", y = "Count")
+p1.3emp
+
+p1.4ir <- ggplot(data = loan, aes(x=grade, y=int_rate)) +
+  geom_boxplot(color = "darkgray") + 
+  labs(title = "Interest Rate", x = "Grade", y = "Interest Rate (%)")
+```
+
+```{r include=FALSE}
+library(gridExtra)
+```
+
+```{r}
+grid.arrange(p1.1grade,p1.2inc,p1.4ir,nrow = 2)
+```
+
+Looking at the graphs, I believe loan grade, annual income, and interest rate will be significant predictors of my y variable.  
+
+Here are plots of the regressors that I believe has an effect on Y. Loan grade represents how volatile the loan issued was, with G being the most volatile and having the most potential for return. For this variable, I had to turn it into a factor class so R could know how to analyze it. As you can see, most of the loans were risk averse. I made box plots for annual income, employment length, and interest rate. As you can see, most people in the data have an income below a million dollars, have been employed for at least a decade, and made loans with interest rates from 10 - 20%.  
+
+###1.3 - Correlations between Y and X Variables  
+
+In this section, I will make plot a correlation between Y and each of my 4 X's. Because linear regression is not appropriate way to fit a model on a categorical variable, I will be using logistic regressions instead. Just to make sure, I need to check whether the probabilities of my logistic models corresponds with fully paid or defaulted/charged off. As the bottom line of code shows, they correspond with the chances of you paying off the loan on your account.  
+
+```{r}
+contrasts(loan$loan_status)
+```
+
+For each regression, z-statistics are made for each regressor and its factors. I will initially assume that they have no effect on loan status.  
+
+```{r}
+model1.1=glm(loan_status~grade,data=loan,family=binomial)
+summary(model1.1)
+```
+
+The p-value for all the levels of grade are very low, signifying that it has explanatory power. It seems that as you go up grades, your chances of paying off your account decreases (risk of defaulting increases). This makes sense because the loans become riskier.  
+
+```{r}
+model1.2=glm(loan_status~annual_inc,data=loan,family=binomial)
+summary(model1.2)
+```
+
+The p-value for annual income is very low, signifying that it has explanatory power. It seems that as your income increases, your chances of paying off your account increases (risk of defaulting decreases). This makes sense because you would greater ability to pay it off.  
+
+```{r}
+model1.3=glm(loan_status~emp_length,data=loan,family=binomial)
+summary(model1.3)
+```
+
+The p-value for the levels of employment length seems to decrease as employment length increases. This is interesting; I suppose that as you gain more work experience, it becomes a better indication on your ability to pay off your loan. I'm not sure if it'll be effective to remove the levels that don't have large explanatory power.  
+
+```{r}
+model1.4=glm(loan_status~int_rate,data=loan,family=binomial)
+summary(model1.4)
+```
+
+The p-value for interest rate is very low, signifying that it has explanatory power. This makes sense, as the interest rate increases, the payments you have to make increase, and you're less likely to pay them off (rate of defaulting increases).  
+
+***  
+
+##**Second Report**   
+
+###2.1 - Fitting my 5 Logistic Regressions   
+
+For my second report, I will be making more complex logit regressions using the variables I tested. Looking back at my previous report, I can see that the coefficient for grade had a very low p-value and was shown to have explanatory power. This makes sense, as grade shows how risk averse a borrower is and how he or she may behave in the future. Thus, I will be building my models off of that first. I will pay special attention to interest rate and annual income as those also had low p-values. Emp_length seemed to be insignificant for some of its levels, so I am considering leaving that variable out entirely. While it's true that people who have worked longer might be better at paying off their loans, this data set doesn't distinguish years worked after 10 years, so it may not be a good variable to look at.  
+
+```{r}
+model2.1=glm(loan_status~grade+annual_inc,data=loan,family=binomial)
+summary(model2.1)
+```
+
+Holding grade constant, the p-value of the coefficient for annual income is still significant and has a positive effect on the chances of a customer paying off their loan.  
+
+```{r}
+model2.2=glm(loan_status~grade+emp_length,data=loan,family=binomial)
+summary(model2.2)
+```
+
+Holding grade constant, only two of the factor levels for employment length seem to be insignificant, the rest still have some explanatory power. They don't seem to be as significant as my other regressors, so to make it easier on myself, I'll just leave this variable out.  
+
+```{r}
+model2.3=glm(loan_status~grade+int_rate,data=loan,family=binomial)
+summary(model2.3)
+```
+
+Holding grade constant, interest rate still exhibits a lot of explanatory power on loan status. What's interesting here is that after separating the effect of the interest rate, grade now has a positive effect on loan repayment. All the variables still have low p-values and are significant.  
+
+In order to make up for not including employment length in my model, I decided to add two more variables into the dataset that likely explain the behavior or the loan status variable: funded amount and installments. Funded amount represents how much money was given in each loan, and installments represents how much borrowers paid off their loan each month. Below are my graphs, and I will discuss them more in the following section.  
+
+```{r}
+model2.4=glm(loan_status~grade+annual_inc+int_rate,data=loan,family=binomial)
+summary(model2.4)
+```
+
+Regressing on my previous variables, they still appear to be significant.  
+
+```{r}
+model2.5=glm(loan_status~grade+annual_inc+int_rate+funded_amnt+installment,data=loan,family=binomial)
+summary(model2.5)
+```
+
+
+###2.2 - Choosing my Best Regression
+
+```{r}
+summary(model2.5)$coef
+```
+
+My method of adding variables onto grade proved to be fruitful. Doing so allowed me to surely eliminate other variables from my model that didn't seem to have much explanatory power. The best regression I found was model 2.5 where loan status is regressed by grade, annual income, interest rate, funded amount, and installments. Because all these coefficients have very low p-values, I can reject the null and say they play a role in explaining the behavior of loan status.  
+
+I can interpret the coefficients as how much your chances of fully paying off your loan or not (defaulting or being very late) increases per unit. As the grade goes up, it has a positive effect on the rate of paying off the loan. It initially had a negative effect, but after I separated the effect of the interest rate, it changed. Same goes with installments; the more you pay off each month, the more likely you are to pay off your loan. The reverse is true for interest rates and funded amounts; the more you're funded might be an indication of how much trouble you're in. Higher interest rates naturally make loans harder to pay off.  
+
+
+###2.3 Graph of Coefficients and Standard Error  
+
+```{r include=FALSE}
+library(coefplot)
+```
+
+```{r}
+coefplot(model2.5)
+```
+
+Here is a plot showing the coefficients of my models and their standard errors, expressed as a confidence interval. Apart from grade, many of the coefficient values are close to zero, so while they are significant, I havea feeling they may be eliminated in other moders. However, the standard errors appear to be small, which is a good sign.  
+
+###2.4 - Confusion Matrix and True Positive & False Positive Rates 
+
+To calculate these, I will first need to train my model on a portion of the data set, test it on another, and see how the predicted values compared to the orginal values. I will split the dataset into halves. 
+
+```{r}
+set.seed(2)
+train2 = loan %>% sample_frac(0.4701)
+test2 = loan %>% setdiff(train2)
+```
+
+```{r}
+glmtrain2.1=glm(loan_status~grade+int_rate+funded_amnt+installment+annual_inc,data=train2,family=binomial)
+summary(glmtrain2.1)
+```
+
+Now that we have the trained model, we will use the testing dataset in order to predict the loan status for our test data. Afterwards, we can compute the predictions and comapre them to the actual results from the original dataset.   
+
+```{r}
+glmtest2.2=predict(glmtrain2.1,test2,type="response")
+glmtest2.2[1:25]
+```
+
+The probability of each observation being fully paid is actually quite high. This seems to match up with how many fully paid observations there were in the original dataset. Because of this, I will set a stricter threshold for the observations to be treated as fully paid.   
+
+```{r}
+glmpredict2.3=rep("Default or Charged Off",186630)
+glmpredict2.3[glmtest2.2>.8] = "Fully Paid"
+table(glmpredict2.3,test2$loan_status)
+```
+
+```{r}
+#True Positive Rate 
+(74192)/(74192+11172)
+
+#False Positive Rate 
+(32174)/(32174+69092)
+
+1 - (74192+32174)/186630
+logit_error = 1 - mean(glmpredict2.3 == test2$loan_status)
+logit_error
+
+```
+
+The TP rate is relatively high, and the FP rate is pretty low. This is normally a good sign, but it apprears on average, the logit model isn't really accurate in predicting whether an observation defaults or gets paid off. The error rate is around 43%, which is a little better than guessing.  
+
+
+###2.5 - Probit Regression  
+
+```{r}
+glmtrain2.4=glm(loan_status~grade+int_rate+funded_amnt+installment+annual_inc,data=train2,family = binomial(link = "probit"))
+
+glmtest2.5=predict(glmtrain2.4, test2, type = "response")
+
+glmpredict2.6=rep("Default or Very Late",186630)
+glmpredict2.6[glmtest2.5>.8] = "Fully Paid"
+table(glmpredict2.6,test2$loan_status)
+```
+
+```{r}
+#True Positive Rate 
+(72863)/(72863+10882)
+
+#False Positive Rate 
+(32464)/(32464+70421)
+
+1 - mean(glmpredict2.6 ==test2$loan_status)
+```
+
+Compared to the rates from before, the TP and TN rates appear to be the same, meaning the model holds about the same even when using a function based off of the normal distribution. However, the error rate seems to show that the probit model isn;t very accurate.  
+
+***  
+
+##**Third Report**  
+
+###3.1 - Dividing my Data  
+
+As the question asked for, I will start by splitting my data set into a training and testing sets in order to estimate the test errors of my ridge regressions and lasso functions.  
+
+```{r}
+set.seed(3)
+loan2 = loan[,-4]
+loan2$grade <- as.factor(loan2$grade)
+train3 = loan2 %>% sample_frac(0.415)
+test3 = loan2 %>% setdiff(train3)
+
+grid = 10^seq(10, -2, length = 100)
+
+x = model.matrix(loan_status~., train3)[,-1]
+y = train3$loan_status
+
+x_train3 = model.matrix(loan_status~., train3)[,-1]
+y_train3 = train3$loan_status
+
+x_test3 = model.matrix(loan_status~., test3)[,-1]
+y_test3 = test3$loan_status
+```
+
+####3.2 - Ridge and Lasso Regression  
+
+a) Using cross-validation to find the flexibly of the model (lambda)    
+
+```{r include=FALSE}
+library(glmnet)
+```
+
+```{r, cache=TRUE}
+cv.out = cv.glmnet(x_train3, y_train3, alpha = 0,family = "binomial")
+```
+
+```{r, cache=TRUE}
+bestlam = cv.out$lambda.min 
+bestlam
+```
+
+For my ridge model, the lambda that appears to minimizes the cross validation error appears to be a very small decimal. That means the original model may not need a lot of tuning; the variance of the original model was already at an optimal level. Below is my lasso model.  
+
+```{r, cache=TRUE}
+cv.out2 = cv.glmnet(x_train3, y_train3, alpha = 1,family = "binomial")
+```
+
+```{r, cache=TRUE}
+bestlam2 = cv.out2$lambda.min
+bestlam2
+```
+
+According to the lasso model, the tuning parameter should be even smaller. Thus, I don't believe shrinkage would help in fine-tuning my model since the results will be so close to the original logit model anyways. However, I will test out both models to see how well they work.  
+
+b) Choose the lambda which is within 1 standard error of the minimum lambda   
+
+Here, I first extract the standard error and than add it to the minimum lambda. Here are the values for both kinds of graphs.  
+
+```{r}
+#Ridge Model 
+mse.min1 <- min(cv.out$cvm)
+mse.min1 + bestlam
+```
+
+```{r}
+#Lasso Model 
+mse.min2 <- min(cv.out2$cvm)
+mse.min1 + bestlam2
+```
+
+While lambda increased by a bit, at most, we can say lambda is close to 1 now, which wouldn't make much of a difference.   
+
+c) Plot of cross-validation error and the chosen lambda 
+
+```{r}
+#Ridge Model 
+plot(cv.out)
+```
+
+```{r}
+#Lasso Model 
+plot(cv.out2)
+```
+
+The cross validation errors for all the lambdas in general appears to be very small.  
+
+
+d) Plot of coefficient varaition vs. lambda  
+
+```{r, message=FALSE, cache=TRUE}
+#Ridge Model
+ridge_br = glmnet(x, y, alpha = 0, family = "binomial")
+plot(ridge_br, xvar = "lambda")
+```
+
+```{r, cache=TRUE}
+#Lasso Model
+ridge_bl = glmnet(x, y, alpha = 1, family = "binomial")
+plot(ridge_bl, xvar = "lambda")
+```
+
+
+e) Coefficients of chosen lambda    
+
+```{r, cache=TRUE}
+predict(ridge_br,type = "coefficients", s=bestlam)
+```
+
+```{r, cache=TRUE}
+predict(ridge_bl,type = "coefficients", s=bestlam2)
+```
+
+
+f) Error Rate of the test subset  
+
+```{r, cache=TRUE}
+ridge_mod = glmnet(x_train3, y_train3, alpha = 0, family = "binomial")
+ridge_pred = predict(ridge_mod, s = bestlam, newx = x_test3)
+ridge_matrix = rep("Default or Charged Off",164046)
+ridge_matrix[ridge_pred>.8] = "Fully Paid"
+table(ridge_matrix, y_test3)
+```
+
+```{r, cache=TRUE}
+lasso_mod = glmnet(x_train3, y_train3, alpha = 1, family = "binomial")
+lasso_pred = predict(lasso_mod, s = bestlam2, newx = x_test3)
+lasso_matrix = rep("Default or Charged Off",164046)
+lasso_matrix[lasso_pred>.8] = "Fully Paid"
+table(lasso_matrix, y_test3)
+```
+
+
+```{r}
+#Ridge Model Error Rate
+ridge_error = 1 - (98672+16276)/164046
+ridge_error
+
+#Lasso Model Error Rate 
+lasso_error = 1 - (17343+96499)/164046
+lasso_error
+```
+
+g) Error rate comparison and logit model coeffcients 
+
+```{r}
+error_table3.1 = rbind(logit_error,ridge_error,lasso_error)
+error_table3.1
+coefficients(model2.5)
+```
+
+Compared to my logit model, which had an error rate of 43%, my ridge and lasso models has decreased this rate by about 10%. With these techniques, it looks like optimally increasing bias and lowering variance in my models have helped them considerably.  
+
+
+###3.3 - Running a Regression or Classification Tree  
+
+a) Tree Plot  
+
+```{r include = FALSE}
+library(tree)
+```
+
+```{r, cache=TRUE}
+set.seed(3.5)
+train3.5 = loan %>% sample_frac(0.4701)
+test3.5 = loan %>% setdiff(train3.5)
+
+tree_loan = tree(factor(loan_status)~grade+int_rate+funded_amnt+installment+annual_inc, data = train3.5, control = tree.control(nobs = 186877, mincut=1,minsize=2,mindev=0.01))
+summary(tree_loan)
+```
+
+```{r, cache=TRUE}
+plot(tree_loan)
+text(tree_loan, pretty = 0)
+```
+
+The resulting tree doesn't show many levels and isn't very interesting. Unfortunatly I don't believe pruning this would do any better.  
+
+b) Error rate of the testing set  
+
+```{r}
+head(predict(tree_loan, test3.5))
+head(predict(tree_loan, test3.5, type = "class"))
+```
+
+```{r}
+tree_pred = predict(tree_loan, test3.5, type = "class")
+table(tree_pred, test3.5$loan_status)
+```
+
+```{r}
+1 - (143294)/(186721)
+```
+
+This approach leads to an error rate of about 23%. This number may be high because of the large number of people in my dataset who already fully paid their accounts, but I'm not sure how much I can trust this error rate because of how simplistic my tree is.  
+
+c) Tree pruning with cross validation  
+
+```{r, cache=TRUE}
+set.seed(5)
+cv.loan = cv.tree(tree_loan, FUN = prune.misclass)
+plot(cv.loan$size, cv.loan$dev, type = "b")
+cv.loan
+```
+
+It seems that any number of terminal nodes (1 or 3) leads to a similar cross validation error rate, with 5504 errors (my data set is large, so this number is trivial). So for the time being, I will just use 3 terminal nodes.  
+
+d) Pruned Tree Model    
+
+```{r, cache=TRUE}
+prune_loan = prune.misclass(tree_loan, best = 3)
+plot(prune_loan)
+text(prune_loan, pretty = 0)
+```
+
+e) Tree Interpretation of splits and selected variables   
+
+Pruning didn't change my tree at all. In my model, grade seems to be the most significant regressor that explains the behavior of loan status followed by interest rate. However, the final nodes of my tree doesn't make much sense, so I can't make a good interpretation of this tree. 
+
+f) Comparison of Error Rates   
+
+```{r, cache=TRUE}
+tree_pred = predict(prune_loan, test3.5, type = "class")
+table(tree_pred, test3.5$loan_status)
+```
+
+Because my tree didn't change, the error rate shouldn't have changed from the beginning. This model still has a low error rate, but again, I'm not inclined to believe it. I have reached out for help during office hours, and it seems like other students with this data set have also found that this model doesn't fit into a tree model very well. Thus, I will ignore this modeling techinque.  
+
+***  
+
+###**Fourth Report**    
+
+####4.1 - Creating a training and testing subset  
+
+```{r}
+#For some reason, my grade variable was interpreted as a character, so I had to change its type. 
+#Also, I randomly sampled a smaller dataset to use for splitting. When I tried using the full dataset on my random forest models, R couldn't knit the chunks into a document because it was too big. 
+set.seed(4)
+loan_rf = sample_n(loan2,35000)
+train4 = loan_rf %>% sample_frac(0.48)
+train4$grade <- as.factor(train4$grade)
+test4 = loan_rf %>% setdiff(train4)
+test4$grade <- as.factor(test4$grade)
+nrow(train4)
+nrow(test4)
+view(train4)
+```
+
+####4.2 - Bagging Classification  
+
+Bagging classification is meant to improve on the normal tree models by fitting many tree models and and aggregating all of their values. Using this, we can reduce the variance of our prediction and prevent some overfitting.  
+
+a) Bagging Classification Model& Plot of Out-of-Bag Error rate vs. Number of Trees  
+```{r, message=FALSE}
+library(MASS)
+library(randomForest)
+```
+
+```{r, cache=TRUE}
+bag.loan = randomForest(factor(loan_status)~annual_inc+grade+int_rate+funded_amnt+installment,
+                        data=train4, 
+                        mrty=ncol(train4)-1, 
+                        ntree=300, 
+                        importance=TRUE, 
+                        do.trace = 100)
+bag.loan
+```
+
+In this model, I use a bagging classification model in order to regress loan status on all my other variables. This model uses all predictor variables for each split node of the tree, but it improves on a regular tree model by making many of them and making different samples for each one.  
+The out-of-bag error rate doesn't seem to decrease after many trees are used. It's very low which is good, and it seems that using 2 variables per split is ideal.  
+
+```{r}
+plot(bag.loan)
+```
+
+The plot shows that the out-of-bag (OOB) error rate actually stays pretty stteady, but it dips and plateus after the first 50 trees. 
+
+b) Error rate table of predicted vs. observed values
+
+```{r, cache=TRUE}
+bag.pred=predict(bag.loan, newdata = test4, type = "response")
+table(bag.pred, test4$loan_status)
+```
+
+Here is my error rate table that charts the predicted values of my bagging model against the observed values from the testing data set. Because the bagging model already gives responses in factors, there's no need for me to convert or subset percentages like I did for my models in previous reports.  
+
+c) Comparison of Error Rates   
+
+```{r}
+bag_error = 1 - (658+11761)/16832
+error_table4.2 = rbind(lasso_error,ridge_error,bag_error)
+error_table4.2
+```
+
+The bagging regression only imporved the error rate of my model by very little.   
+
+d) Importance Matrix  
+
+```{r}
+randomForest::importance(bag.loan)
+```
+
+The importance matrix of a bagging model tells that annual income dreases the gini of my model the most, improving the accuracy of my model the most. If we leave it out, the Gini index and impurity will increase substantially.  
+
+####4.3 - Random Forest Classification  
+
+a)Random Forest Model and OOB error rate vs Number of predictors in each split  
+
+```{r, cache=TRUE}
+oob.e <-double(5)
+test.e <-double(5)
+
+for(mtry in 1:5)
+{
+  rfa=randomForest(factor(loan_status)~annual_inc+grade+int_rate+funded_amnt+installment,
+                   data=train4, 
+                   mtry=mtry, 
+                   ntree=300)
+  
+  oob.e[mtry] = rfa$err.rate[300] #OOB Error 
+  
+  rfa.pred=predict(rfa, newdata = test4, type = "response")
+  test.e[mtry] = 1 - mean(rfa.pred==test4$loan_status) # Testing Set Error 
+}
+
+```
+
+```{r}
+matplot(1:mtry , oob.e, pch=20 , col="blue",type="b",ylab="OOB Error Rate",xlab="Number of Predictors Considered at each Split")
+
+legend("bottomright",legend=c("Out of Bag Error"),pch=19, col=c("blue"))
+```
+
+Random forest classification is meant to improve on bagging by varying the number of variables used in each split, thus creating a variety of trees that doesn't overfit the data and making it less sensitive to changes in data.  
+
+Looking at the OOB Error plot of my random forest plot, the error rate seems to increase as more variables are used for each split, using one predictor leads to the smallest error rate. This might have happened because I have few predictors. 
+
+b) Tuned Random Forest model and OOB Errors 
+
+```{r, cache=TRUE}
+rf.loan = randomForest(factor(loan_status)~annual_inc+grade+int_rate+funded_amnt+installment,
+                       data = train4,
+                       mtry = 1,
+                       importance = TRUE, 
+                       ntree = 300, 
+                       do.trace = 100)
+```
+
+After tuning the my model so just one predictor is used per split, the OOB error rate has decreased per 100 trees when compared to the untuned model.  
+
+c) Error rate table of predicted vs. observed values 
+
+```{r, cache=TRUE}
+rf.pred=predict(rf.loan, newdata = test4, type = "response")
+table(rf.pred, test4$loan_status)
+```
+
+d) Comparison of Error Rates   
+
+```{r}
+rf_error = 1 - (315+12618)/16832
+error_table4.3 = rbind(error_table4.2,rf_error)
+error_table4.3
+```
+
+The error rate of my random forest model is 23%, and improves on all my models substantially. It has the lowest error rate by far.  
+
+e) Importance Matrix  
+
+```{r}
+randomForest::importance(rf.loan)
+```
+
+Looking at the importance matrix, the annual income variable decreased the gini and impurity of the splits in the random forest model. It seems to be the most important.  
+
+f) OOB error rate & Error rate vs Number of predictors in each split  
+
+```{r}
+matplot(1:mtry , cbind(oob.e,test.e), pch=20,
+col=c("red","blue"), type="b",
+ylab="Classification Error Rate",
+xlab="Number of Predictors Considered at each Split")
+legend("topright", legend=c("Out of Bag Error","Test Error"),
+pch=19, col=c("red","blue"))
+```
+
+The overall test error when running my testing data set on my random forest model follows a similar trend as the OOB error rate, which is reasonable.  
+
+####4.4 - Boosting Classification  
+
+```{r}
+#The boosting xgboost model asks for my y variable to be a column of 0's and 1's. Thus, I will make a new dataset that subsets these new values in for the loan status column. I tried just subsetting for one of my older matrices, but it wouldn't work
+
+loan4 = loan2 
+
+loan4$loan_status <- factor(loan4$loan_status)
+loan4$loan_status <- as.character(loan4$loan_status)
+loan4[loan4$loan_status == "Default or Charged Off",]$loan_status <- "0"
+loan4[loan4$loan_status == "Fully Paid",]$loan_status <- "1"
+loan4$loan_status <- as.numeric(loan4$loan_status)
+```
+
+```{r}
+#Using this dataset, I will make a new training and testing dataset that includes the type change for my grade variable
+
+set.seed(45)
+train44 = loan4 %>% sample_frac(0.415)
+train44$grade <- as.factor(train44$grade)
+test44 = loan4 %>% setdiff(train44)
+test44$grade <- as.factor(test44$grade)
+```
+
+a) Boosting classfication model & Error rate table of predicted vs. observed values   
+
+```{r, cache=TRUE, message=FALSE}
+library(gbm)
+set.seed(44)
+boost.loan = gbm(loan_status~annual_inc+grade+int_rate+funded_amnt+installment,
+                 data = train44, 
+                 distribution = "bernoulli", 
+                 n.trees = 1000, 
+                 interaction.depth = 4, 
+                 shrinkage = 0.01, 
+                 verbose = F)
+```
+
+```{r, cache=TRUE}
+boost.pred=predict.gbm(object = boost.loan, newdata = test44, type = "response", n.trees = 1000)
+boost.pred2=rep("Default or Very Late",164108)
+boost.pred2[boost.pred>.8] = "Fully Paid"
+table(boost.pred2,test44$loan_status)
+```
+
+The boosting model is supposed to improve on the other tree-based models because it sequentially builds a model based on the prediction errors of the one right before it. However, looking at the error rate table, there seems to have been more errors made with this model.  
+
+b) Comparison of Error Rates    
+
+```{r}
+boost_error = 1 - (30370+63939)/164108
+boost_error
+errortable4.4 = rbind(error_table4.3,boost_error)
+errortable4.4
+```
+
+My suspicions are confirmed, the boosting model performs the worst out of all the models. It is only a little better than guessing. Because of this, this model may require a lot of tuning.  
+
+c) Importance Matrix  
+
+```{r}
+summary(boost.loan)
+```
+
+Looking at my importance matrix, interest rate has the largest effect on building my boosting model, followed by grade. 
+
+####4.5 - XGBoost Classification 
+
+a) XGBoost Classification Model & Error rate table of predicted vs. observed values  
+
+```{r include=FALSE}
+library(xgboost)
+```
+
+```{r}
+#Putting data into matrix form with new testing and training sets
+
+y_train4 <- train44$loan_status
+x_train4 <- model.matrix(loan_status~., train44)[,-1]
+
+#Preparing for xgboost model 
+dtrain4 <- xgb.DMatrix(data = x_train4, label = y_train4)
+dtest4 <- model.matrix(loan_status~.,test44)[,-1]
+```
+
+
+```{r, cache=TRUE}
+#Building xgboost model using xgboost package
+set.seed(46)
+xgb.loan = xgboost(data=dtrain4, max_depth=2, eta = 0.1, nrounds=40,
+                   lambda=0,
+                   print_every_n = 10, objective="binary:logistic")
+```
+
+```{r, cache=TRUE}
+xgb.pred=predict(xgb.loan, newdata = dtest4, type = "response")
+xgb.pred2=rep("Default or Very Late",164108)
+xgb.pred2[xgb.pred>.8] = "Fully Paid"
+table(xgb.pred2,test44$loan_status)
+```
+
+The XGboost model, while similar to bagging, uses a different technique to evaluate the how effective each split is in building the model.  
+
+The results of my table seem to be similar to my boosting model. Again, a lot more errors seemed to have been made with the predictions.  
+
+b) Comparison of Error Rates  
+
+```{r}
+xgb_error = 1 - (18875+93654)/164108
+xgb_error
+errortable4.5 = rbind(errortable4.4,xgb_error)
+errortable4.5
+```
+
+Luckily, it seems that XGboost model has a similar error rate as my lasso and ridge models. It might benefit from some tuning.  
+
+c) Importance Matrix  
+
+```{r}
+importance_xgb <- xgb.importance(colnames(x_train4),model=xgb.loan)
+importance_xgb
+```
+
+Like in my boostinf model, interest rate plays the largest role in building my model and it seems to be the most important.  
+
+###4.6 - (Extra Credit) Tuned Boosting Model 
+
+a) Tuned Boosting Model & Error rate table of predicted vs. observed values 
+
+```{r}
+hyper_grid <- expand.grid(
+shrinkage = c(0.005, 0.08, 0.01),
+interaction.depth = c(1, 5, 10),
+optimal_trees = 0,
+min_error = 0)
+```
+
+```{r, cache=TRUE}
+for(i in 1:nrow(hyper_grid)) {
+set.seed(46)
+
+# train model
+gbm.tuned <- gbm(
+formula = loan_status~annual_inc+grade+int_rate+funded_amnt+installment,
+distribution = "bernoulli",
+data = train44,
+n.trees = 3000,
+
+interaction.depth = hyper_grid$interaction.depth[i],
+shrinkage = hyper_grid$shrinkage[i],
+
+train.fraction = 0.75,
+
+verbose = FALSE
+)
+
+# add min training error and trees to grid
+hyper_grid$optimal_trees[i] <- which.min(gbm.tuned$valid.error)
+hyper_grid$min_error[i] <- min(gbm.tuned$valid.error)
+}
+
+hyper_grid %>%
+dplyr::arrange(min_error) %>%
+head(10)
+```
+
+After using hyperparameter tuning, it seems like the parameters that leads to the smallest error rate is a learning rate of 0.01, a depth of 5, and 2983 trees. However, I'm not sure if my error rate was coded correctly.  
+
+```{r, cache=TRUE, message=FALSE}
+library(gbm)
+set.seed(46)
+bboost.loan = gbm(loan_status~annual_inc+grade+int_rate+funded_amnt+installment,data =
+                   train44, distribution = "bernoulli", n.trees = 2983, interaction.depth
+                  = 5, shrinkage = 0.01, verbose = F)
+
+```
+
+```{r, cache=TRUE}
+bboost.pred=predict.gbm(object = bboost.loan, newdata = test44, type = "response", n.trees = 2983)
+bboost.pred2=rep("Default or Very Late",164108)
+bboost.pred2[bboost.pred>.8] = "Fully Paid"
+table(bboost.pred2,test44$loan_status)
+```
+
+Compared to the other error rate tables I have seen, this one doesn't seem to do a good job. There are substaintially more errors made with the prediction.  
+
+b) Comparison of Error Rates    
+
+```{r, cache=TRUE}
+bb_error = 1-(64404+30395)/164108
+error_table4.6 = rbind(errortable4.5, bb_error)
+error_table4.6
+```
+
+My tuned boosted model didn't imporve on the original one, so this leads me to believe that I didn't code something correctly in my original tuned model. I revisit this as I believe the model has a lot of potential, and show what work I have so far. 
+
+c) Importance Matrix  
+
+```{r, cache=TRUE}
+summary(bboost.loan)
+```
+
+Despite note having the best error rate, the tuned boosted model still shows that interest rate seems to be the most important variable in building the model.  
+
+***  
+
+## **Conclusion**  
+After running historgrams and boxplots of my predictor variables in my first report as well as 
+regressing them on loan status, I found that annual income, interest rate, and grade produced 
+models with very low p-values for their corresponding t-tests, meaning they had high explanatory power. It's a shame that employment length was not one of these; the data set had several levels for yeas, and some of them were significant and others were not. For the sake of convenience, I decided to leave it out.  
+
+In my second report, I began building more complex logistic regression models by including more than one regressor in each one. I gradually built five models, adding a variable each time and checking the significance of each as I did. My resulting model ended up having loan status being regressed on annual income, interest rate, grade, installment, and funded amount. The last two I added in order to make my model more interesting, and their t-test pvalues showed that they were just as significant as the other variables. However, the error rate of this original logit model was 43%, which is a little better than guessing, but still not ideal. The probit model only increased this error rate.  
+
+I was really satisfied to find how much the ridge and lasso model imporved my model error rate in my third report. Both techniques attempt at reducing varaince by penalizing for extra variables that I add in my model. After running them, I found that the error rate went down to 30%, which was a substantial decrease. The ideal lambda that I found for these models were surprisingly small, but it still had a large effect. Unfortunatly, the tree model didn't give aa meanigful result possibly because of how my data was interpreted. Perhaps the many levels of grade were confusing for the model to work with.  
+
+Finally, in my fourth model, I used modeling techniques that built off of tree models. The best model from this report, and for my entire project so far, is a random forest model. After creating a for loop to find the optimal number of variables to use in each split (it was one variable), I used that value to model a new random forest model. This constrasts with my bagging model which uses the full number of  regressors per split. I was able to get an 
+error rate of 23%, which is very good. My boosting model ended up needing a lot of tuning that I attempted at, but I will revisit again for my final submission.  
+
+My report has a decent amount of subsetting and cleaning because of how very few observations in the data set actually defaulted at first. In the future, I would like to find some way to explore the other levels of loan status, such as late or charged off. For now and for the sake of convenience, I made loan status to be a simple, binary variable.  
+
+
+
